@@ -8,7 +8,7 @@ JSON 文件存储。替代 SQLAlchemy + SQLite，零数据库依赖。
 设计要点（与旧版响应结构保持兼容）：
 - 统一剥掉旧版 wrapper key（旧版 experiences 存 {"experiences":[...]}，这里直接存 [...]）
 - 字段名用 snake_case（与旧版 model_dump 后入库的形态一致）
-- 保留拼写陷阱 compensation_and_benfits（前端有兜底，不改）
+- 保留拼写陷阱 compensation_and_benfits（与旧版 key 完全一致，潜在消费者靠 try/except 兼容）
 """
 import json
 import os
@@ -24,9 +24,16 @@ def _now_iso() -> str:
 
 
 def _write_json(path: str, data: dict) -> None:
+    """
+    原子写：先写临时文件再 os.replace，掉电 / 多 worker 并发都不会产生半写文件。
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def _read_json(path: str) -> Optional[dict]:
@@ -68,20 +75,22 @@ def get_resume_view(resume_id: str) -> Optional[dict]:
     return {
         "resume_id": rec["resume_id"],
         "raw_resume": {
+            # 兼容字段，恒为 0；列表渲染请用 resume_id。
             "id": 0,
             "content": rec.get("content", ""),
             "content_type": rec.get("content_type", "md"),
             "created_at": rec.get("created_at"),
         },
         "processed_resume": {
-            "personal_data": p.get("personal_data"),
-            "experiences": p.get("experiences"),
-            "projects": p.get("projects"),
-            "skills": p.get("skills"),
-            "research_work": p.get("research_work"),
-            "achievements": p.get("achievements"),
-            "education": p.get("education"),
-            "extracted_keywords": p.get("extracted_keywords"),
+            # 字段缺失或 LLM 解析失败时回退到空 dict/list，避免前端拿到 null。
+            "personal_data": p.get("personal_data") or {},
+            "experiences": p.get("experiences") or [],
+            "projects": p.get("projects") or [],
+            "skills": p.get("skills") or [],
+            "research_work": p.get("research_work") or [],
+            "achievements": p.get("achievements") or [],
+            "education": p.get("education") or [],
+            "extracted_keywords": p.get("extracted_keywords") or [],
             "processed_at": p.get("processed_at"),
         },
     }
@@ -119,24 +128,24 @@ def get_job_view(job_id: str) -> Optional[dict]:
     return {
         "job_id": rec["job_id"],
         "raw_job": {
-            "id": 0,
+            "id": 0,  # 兼容字段，恒为 0
             "resume_id": rec.get("resume_id"),
             "content": rec.get("content", ""),
             "created_at": rec.get("created_at"),
         },
         "processed_job": {
             "job_title": p.get("job_title"),
-            "company_profile": p.get("company_profile"),
-            "location": p.get("location"),
+            "company_profile": p.get("company_profile") or {},
+            "location": p.get("location") or {},
             "date_posted": p.get("date_posted"),
             "employment_type": p.get("employment_type"),
-            "job_summary": p.get("job_summary"),
-            "key_responsibilities": p.get("key_responsibilities"),
-            "qualifications": p.get("qualifications"),
+            "job_summary": p.get("job_summary") or "",
+            "key_responsibilities": p.get("key_responsibilities") or [],
+            "qualifications": p.get("qualifications") or {},
             # 注意拼写：保留旧版的 "benfits" 以兼容全链路
             "compensation_and_benfits": p.get("compensation_and_benfits"),
-            "application_info": p.get("application_info"),
-            "extracted_keywords": p.get("extracted_keywords"),
+            "application_info": p.get("application_info") or {},
+            "extracted_keywords": p.get("extracted_keywords") or [],
             "processed_at": p.get("processed_at"),
         },
     }
@@ -147,6 +156,7 @@ def get_job_view(job_id: str) -> Optional[dict]:
 # 统一存数组/对象（剥掉旧版 wrapper key），与 get_resume_view/get_job_view 对齐。
 
 _CAMEL_RESUME_MAP = {
+    # 带空格标题（prompt 标准形态）
     "Personal Data": "personal_data",
     "Experiences": "experiences",
     "Projects": "projects",
@@ -155,6 +165,10 @@ _CAMEL_RESUME_MAP = {
     "Achievements": "achievements",
     "Education": "education",
     "Extracted Keywords": "extracted_keywords",
+    # 兼容驼峰键
+    "personalData": "personal_data",
+    "researchWork": "research_work",
+    "extractedKeywords": "extracted_keywords",
 }
 
 _CAMEL_JOB_MAP = {

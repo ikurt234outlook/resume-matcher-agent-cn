@@ -18,7 +18,11 @@ def extract_pdf(file_bytes: bytes) -> str:
 
 
 def extract_docx(file_bytes: bytes) -> str:
-    """手写 zip+xml 解析 DOCX（仅依赖标准库，不装 python-docx）。"""
+    """
+    手写 zip+xml 解析 DOCX（仅依赖标准库，不装 python-docx）。
+    按文档序输出，遇 <w:tab> 插入 \\t、<w:br> 插入 \\n、<w:p> 末尾换行。
+    这样双列布局的简历（个人信息｜联系方式）不会被压成一团。
+    """
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as docx:
             document_xml = docx.read("word/document.xml")
@@ -28,12 +32,19 @@ def extract_docx(file_bytes: bytes) -> str:
         raise ValueError("Invalid DOCX file") from e
 
     root = ET.fromstring(document_xml)
-    paragraphs = []
-    for paragraph in root.iter(f"{_WML_NS}p"):
-        texts = [node.text for node in paragraph.iter(f"{_WML_NS}t") if node.text]
-        if texts:
-            paragraphs.append("".join(texts))
-    return "\n".join(paragraphs)
+    out: list[str] = []
+    # 文档序遍历；遇到段落结束再加 \n
+    for elem in root.iter():
+        tag = elem.tag
+        if tag == f"{_WML_NS}t" and elem.text:
+            out.append(elem.text)
+        elif tag == f"{_WML_NS}tab":
+            out.append("\t")
+        elif tag == f"{_WML_NS}br":
+            out.append("\n")
+        elif tag == f"{_WML_NS}p" and out and not out[-1].endswith("\n"):
+            out.append("\n")
+    return "".join(out)
 
 
 def extract_text_from_file(file_bytes: bytes, content_type: str) -> str:

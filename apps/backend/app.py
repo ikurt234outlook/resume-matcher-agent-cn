@@ -59,6 +59,40 @@ def _cors(resp: Response) -> Response:
     return resp
 
 
+# ── CORS 预检：Flask 默认对未注册 OPTIONS 返回 405，
+#    浏览器在跨域 + Content-Type: application/json 场景下会先发预检，
+#    没有这个处理器整个跨域 POST 都会被拦截。
+@app.before_request
+def _preflight():
+    if request.method == "OPTIONS":
+        resp = Response()
+        origin = request.headers.get("Origin")
+        if origin and origin in ALLOWED_ORIGINS:
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Access-Control-Allow-Credentials"] = "true"
+            req_methods = request.headers.get("Access-Control-Request-Method")
+            resp.headers["Access-Control-Allow-Methods"] = req_methods or "GET,POST,OPTIONS"
+            req_headers = request.headers.get("Access-Control-Request-Headers")
+            resp.headers["Access-Control-Allow-Headers"] = req_headers or "*"
+        return resp
+
+
+# ── 统一错误类型：替代 _do_improve 的 (jsonify, status) tuple 模式 ────
+class ApiError(Exception):
+    """业务可主动抛的 HTTP 错误。message / status / service 用于响应构造。"""
+
+    def __init__(self, message: str, status: int = 400, service: str = "api"):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.service = service
+
+
+@app.errorhandler(ApiError)
+def _handle_api_error(e: ApiError):
+    return _err(e.message, e.status, e.service)
+
+
 # ── request_id 工具（与旧版格式兼容：服务段:uuid）────────────────────
 def _request_id(service: str = "api") -> str:
     return f"{service}:{uuid.uuid4()}"
@@ -85,11 +119,9 @@ def upload_resume():
     """上传 PDF/DOCX 简历，解析文本 + LLM 结构化，存 JSON。"""
     rid = _request_id("resumes")
 
-    if "file" not in request.files:
-        return _err("No file provided", 400, "resumes")
-    f = request.files["file"]
+    f = request.files.get("file")
     if not f or not f.filename:
-        return _err("Empty file", 400, "resumes")
+        return _err("No file provided", 400, "resumes")
 
     content_type = f.mimetype or f.content_type
     file_bytes = f.read()
@@ -146,24 +178,22 @@ def improve_resume():
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
         )
 
-    # 非流式
+    # 非流式：异常走全局 errorhandler，类型安全
     result = _do_improve(resume_id, job_id, rid)
-    if isinstance(result, tuple):  # 错误
-        return result
     return jsonify({"request_id": rid, "data": result})
 
 
-def _do_improve(resume_id: str, job_id: str, rid: str):
+def _do_improve(resume_id: str, job_id: str, rid: str) -> dict:
     """
     执行分析（核心逻辑，非流式与流式共用）。
-    成功返回 dict，失败返回 (jsonify, status)。
+    成功返回 dict；失败抛 ApiError，由全局 errorhandler 统一序列化。
     """
     resume = store.get_resume(resume_id)
     if not resume:
-        return _err(f"Resume not found: {resume_id}", 404, "resumes")
+        raise ApiError(f"Resume not found: {resume_id}", 404, "resumes")
     job = store.get_job(job_id)
     if not job:
-        return _err(f"Job not found: {job_id}", 404, "resumes")
+        raise ApiError(f"Job not found: {job_id}", 404, "resumes")
 
     try:
         prompt = PROMPT_HR_JUDGE.format(
@@ -172,9 +202,11 @@ def _do_improve(resume_id: str, job_id: str, rid: str):
             datetime=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
         analysis_result = llm.call_llm(prompt, expect_json=False)
+    except ApiError:
+        raise
     except Exception as e:
         logger.error(f"improve LLM call failed: {e}", exc_info=True)
-        return _err(f"Analysis failed: {e}", 500, "resumes")
+        raise ApiError(f"Analysis failed: {e}", 500, "resumes") from e
 
     return {
         "resume_id": resume_id,
@@ -378,22 +410,41 @@ _MD_SIGNATURE_RE = re.compile(
 
 def _extract_md_block(text: str):
     """
-    从分析结果抽最大的 ```md 代码块作为优化后的简历。返回 (md, source)。
-    判断逻辑：取最长的代码块，若内容足够长（>150 字）且含 markdown 痕迹
-    （标题/加粗/列表/分隔线），即认为是简历；否则返回 None 走 fallback。
+    从分析结果抽 ```md 代码块作为优化后的简历。返回 (md, source)。
+
+    启发式评分替代原先的"取最长"：
+      - 长度分：capped len / 100
+      - 简历关键词分：包含"工作经历"/"教育背景"/"项目经验"/"技能"等核心小节 +5/项
+      - 标题/列表/加粗结构 +1/项
+    取得分最高的代码块；都不过关返回 None 走 fallback。
     """
     if not text:
         return None, "none"
     matches = _CODE_BLOCK_RE.findall(text)
     if not matches:
         return None, "none"
-    candidate = max(matches, key=len).strip()
-    # 足够长 + 含 markdown 结构特征 = 简历
-    if len(candidate) > 150 and _MD_SIGNATURE_RE.search(candidate):
-        return candidate, "extracted"
-    # 兜底：有标题也算（保留旧逻辑兼容）
-    if _HEADING_RE.search(candidate):
-        return candidate, "extracted"
+
+    # 简历常见中文小节标题；命中一个 +5 分
+    resume_section_keywords = (
+        "工作经历", "教育背景", "项目经验", "项目经历",
+        "技能", "个人信息", "联系方式", "工作业绩",
+        "教育经历", "实习经历", "工作项目", "工作项目经验",
+    )
+
+    def _score(candidate: str) -> int:
+        score = 0
+        score += min(len(candidate) // 100, 50)  # 长度分封顶 50
+        for kw in resume_section_keywords:
+            if kw in candidate:
+                score += 5
+        # markdown 结构信号
+        score += len(_HEADING_RE.findall(candidate))
+        score += len(_SECTION_RE.findall(candidate))
+        return score
+
+    best = max(matches, key=_score).strip()
+    if _score(best) >= 5 and len(best) > 150:
+        return best, "extracted"
     return None, "none"
 
 

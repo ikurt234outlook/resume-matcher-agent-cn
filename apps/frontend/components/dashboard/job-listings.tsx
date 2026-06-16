@@ -89,10 +89,11 @@ const JobListings: React.FC<JobListingsProps> = ({ resumeId }) => {
 				title: jobData.processed_job?.job_title || '未知岗位',
 				company: jobData.processed_job?.company_profile?.company_name || '未知公司',
 				location: jobData.processed_job?.location?.city || '未知地点',
-				requirements: jobData.processed_job?.job_requirements?.split('\n').filter(Boolean) || [],
-				responsibilities: jobData.processed_job?.job_responsibilities?.split('\n').filter(Boolean) || [],
+				// 同上：补齐字段映射，避免列表为空
+				requirements: jobData.processed_job?.qualifications?.required ?? [],
+				responsibilities: jobData.processed_job?.key_responsibilities ?? [],
 				job_summary: jobData.processed_job?.job_summary || '',
-				key_responsibilities: jobData.processed_job?.key_responsibilities || [],
+				key_responsibilities: jobData.processed_job?.key_responsibilities ?? [],
 				jobId: jobId
 			};
 			
@@ -130,14 +131,16 @@ const JobListings: React.FC<JobListingsProps> = ({ resumeId }) => {
 			console.log('improveResumeStream response:', improvedResult);
 			// Update the resume preview context with the improved data
 			setImprovedData(improvedResult);
-			// Show a success message
-			alert('简历已成功优化！');
+			// 成功提示直接由 setImprovedData 触发下游渲染（ResumePreviewer 已在监听），
+			// 不再用阻塞性的 alert()。
+			setImproveProgress('✅ 优化完成');
 		} catch (err) {
 			console.error('Error improving resume:', err);
-			alert('简历优化失败，请稍后重试。');
+			// 错误展示在 progress 行，3 秒后由 finally 清掉
+			setImproveProgress('❌ 简历优化失败，请稍后重试');
 		} finally {
 			setIsImproving(false);
-			setImproveProgress('');
+			setTimeout(() => setImproveProgress(''), 3000);
 		}
 	};
 

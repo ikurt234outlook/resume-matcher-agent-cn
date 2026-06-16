@@ -20,9 +20,15 @@ ENV = os.getenv("ENV", "local").lower()
 # LLM 配置（核心）
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
-LL_MODEL = os.getenv("LL_MODEL", "glm-5.1")
+# 兼容 LLM_MODEL（标准命名）与 LL_MODEL（历史命名）。
+# 推荐新配置用 LLM_MODEL，老 .env 用 LL_MODEL 也能跑。
+LL_MODEL = (
+    os.getenv("LLM_MODEL")
+    or os.getenv("LL_MODEL")
+    or "glm-5.1"
+)
 
-# Session 密钥
+# Session 密钥（保留以备未来 Flask-Session 扩展；当前未使用）
 SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", "change-me")
 
 # 后端端口

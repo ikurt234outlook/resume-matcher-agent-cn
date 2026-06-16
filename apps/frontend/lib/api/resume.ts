@@ -24,11 +24,14 @@ export async function uploadJobDescriptions(
  *
  * Falls back to plain non-streaming fetch if `text/event-stream` is unavailable
  * (e.g. some dev proxies buffer the response).
+ *
+ * @param signal 可选 AbortSignal，组件 unmount 时调用以中止请求。
  */
 export async function improveResumeStream(
     resumeId: string,
     jobId: string,
-    onProgress?: (status: string, message: string) => void
+    onProgress?: (status: string, message: string) => void,
+    signal?: AbortSignal
 ): Promise<ImprovedResult> {
     const res = await fetch(
         `${API_URL}/api/v1/resumes/improve?stream=true`,
@@ -36,6 +39,7 @@ export async function improveResumeStream(
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
             body: JSON.stringify({ resume_id: resumeId, job_id: jobId }),
+            signal,
         }
     );
 
@@ -96,7 +100,8 @@ export async function improveResumeStream(
 /** Improves the resume and returns the full preview object (non-streaming). */
 export async function improveResume(
     resumeId: string,
-    jobId: string
+    jobId: string,
+    signal?: AbortSignal
 ): Promise<ImprovedResult> {
     let response: Response;
     try {
@@ -104,6 +109,7 @@ export async function improveResume(
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ resume_id: resumeId, job_id: jobId }),
+            signal,
         });
     } catch (networkError) {
         console.error('Network error during improveResume:', networkError);

@@ -6,6 +6,7 @@ LLM 调用 + JSON 解析兜底。
 """
 import json
 import re
+from typing import Optional
 
 from openai import OpenAI
 
@@ -15,11 +16,11 @@ from config import LLM_API_KEY, LLM_BASE_URL, LL_MODEL
 def _get_client() -> OpenAI:
     if not LLM_API_KEY:
         raise RuntimeError("LLM_API_KEY 未配置，请在 .env 填写。")
-    return OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    return OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=300.0)
 
 
 # 模块级单例客户端，避免每次请求重建
-_client: OpenAI = None
+_client: Optional[OpenAI] = None
 
 
 def _client_singleton() -> OpenAI:
@@ -46,6 +47,7 @@ def call_llm(prompt: str, expect_json: bool = False):
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         top_p=0.9,
+        timeout=300,
     )
     text = response.choices[0].message.content or ""
 
@@ -57,7 +59,38 @@ def call_llm(prompt: str, expect_json: bool = False):
 # ── JSON 解析兜底（照搬旧版 JSONWrapper 的 3 级策略）──────────────────
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]+?)```", re.IGNORECASE)
-_JSON_OBJ_RE = re.compile(r"\{[\s\S]*\}")
+
+
+def _find_balanced_json(text: str) -> str | None:
+    """
+    从第一个 { 开始，按字符串字面量/转义 跳过后配对找对应 }。
+    避免正则贪婪把多个对象拼成一个（这是大模型返回里很常见的 bug）。
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
 
 
 def parse_json_lenient(text: str) -> dict:
@@ -65,7 +98,7 @@ def parse_json_lenient(text: str) -> dict:
     容错解析 LLM 返回的 JSON 文本。3 级兜底：
       1. 直接 json.loads
       2. 抽 ```json ... ``` 代码块再解析
-      3. 正则抽第一个 {...} 再解析
+      3. 平衡括号抽第一个 {...} 再解析（替代原先的贪婪正则）
     全部失败抛 ValueError。
     """
     if not text:
@@ -87,11 +120,11 @@ def parse_json_lenient(text: str) -> dict:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # 3. 正则抽 {...}
-    m = _JSON_OBJ_RE.search(text)
-    if m:
+    # 3. 平衡括号抽 {...}
+    candidate = _find_balanced_json(text)
+    if candidate:
         try:
-            return json.loads(m.group(0))
+            return json.loads(candidate)
         except (json.JSONDecodeError, TypeError):
             pass
 

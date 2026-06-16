@@ -37,7 +37,7 @@ npm run start          # start both (gunicorn + next start)
 ## Code Architecture
 
 ### Backend (Flask) — `apps/backend/`, 7 files
-- `app.py` — Flask app + all routes (8 endpoints, incl. SSE streaming)
+- `app.py` — Flask app + all routes (7 endpoints, incl. SSE streaming)
 - `config.py` — config via os.getenv + dotenv
 - `llm.py` — OpenAI call + 3-level JSON parsing fallback
 - `parser.py` — PDF (pdfminer) / DOCX (stdlib zip+xml) text extraction
