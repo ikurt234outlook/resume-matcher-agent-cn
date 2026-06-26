@@ -12,12 +12,17 @@ COPY apps/frontend/ ./
 ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
+# Allow callers to inject the backend internal URL at build time.
+ARG BACKEND_INTERNAL_URL=http://backend:8000
+ENV BACKEND_INTERNAL_URL=$BACKEND_INTERNAL_URL
+
 RUN npm run build
 
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV BACKEND_INTERNAL_URL=http://backend:8000
 
 # Copy only what's needed at runtime
 COPY --from=builder /app/public ./public
